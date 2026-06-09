@@ -1,7 +1,6 @@
 node_modules
 dist
 coverage
-.tasks/
 *.log
 .DS_Store
 .idea
