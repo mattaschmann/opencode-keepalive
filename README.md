@@ -18,19 +18,17 @@ Cross-process reference counting ensures that multiple opencode instances sharin
 
 ## Install
 
-Add to your project's `opencode.jsonc`:
+Clone the repo and reference the directory in your `opencode.jsonc`:
 
-```jsonc
-{
-  "plugin": ["opencode-keepalive"]
-}
+```bash
+git clone https://github.com/mattaschmann/opencode-keepalive.git ~/path/to/opencode-keepalive
 ```
 
-Or for local development, clone this repo and use:
+Then in your project's (or global) `opencode.jsonc`:
 
 ```jsonc
 {
-  "plugin": ["./"]
+  "plugin": ["~/path/to/opencode-keepalive"]
 }
 ```
 
@@ -58,3 +56,7 @@ No build step — the plugin ships as TypeScript source and is loaded directly b
 - Confirmed: `session.status` events fire with `busy`→`idle` transitions
 - Confirmed: cross-process ref counting holds lock across concurrent sessions
 - Confirmed: cancelled sessions release correctly
+
+## Privacy
+
+This plugin does not transmit any data over the network. All state is stored locally in `~/.cache/opencode-keepalive/lock.json` (session IDs and the holder process PID). Debug-level structured logs include session IDs and event metadata, written only to opencode's local log files. No telemetry, no external requests.
