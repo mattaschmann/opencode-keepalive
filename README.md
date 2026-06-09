@@ -54,4 +54,7 @@ No build step — the plugin ships as TypeScript source and is loaded directly b
 
 ## Version tested
 
-Pending live verification (see `.tasks/project.md`).
+- opencode v1.16.2 on WSL2 (Windows host)
+- Confirmed: `session.status` events fire with `busy`→`idle` transitions
+- Confirmed: cross-process ref counting holds lock across concurrent sessions
+- Confirmed: cancelled sessions release correctly
