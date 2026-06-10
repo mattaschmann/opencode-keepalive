@@ -6,6 +6,8 @@ OpenCode plugin that prevents the host machine from sleeping while AI sessions a
 
 When any session enters `busy` or `retry` status, the plugin spawns a background process that holds a system wake lock. When all sessions return to `idle` (or are deleted/errored), the wake lock is released and the machine can sleep normally.
 
+The plugin prevents system/disk sleep only — the display is allowed to sleep on its own schedule.
+
 Cross-process reference counting ensures that multiple opencode instances sharing the same machine won't release the lock prematurely — the wake lock persists until the *last* active session goes idle.
 
 ## Supported platforms
@@ -13,7 +15,7 @@ Cross-process reference counting ensures that multiple opencode instances sharin
 | Platform | Mechanism |
 |----------|-----------|
 | Windows / WSL2 | `SetThreadExecutionState` via detached `powershell.exe` |
-| macOS | `caffeinate -dim` |
+| macOS | `caffeinate -im` |
 | Linux | `systemd-inhibit --what=idle:sleep` |
 
 ## Install
@@ -56,6 +58,7 @@ No build step — the plugin ships as TypeScript source and is loaded directly b
 - Confirmed: `session.status` events fire with `busy`→`idle` transitions
 - Confirmed: cross-process ref counting holds lock across concurrent sessions
 - Confirmed: cancelled sessions release correctly
+- macOS (darwin): verified via `pmset -g assertions` — `PreventUserIdleSystemSleep` asserts on acquire, clears on release
 
 ## Privacy
 

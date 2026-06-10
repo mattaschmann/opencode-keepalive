@@ -1,14 +1,27 @@
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import type { KeepaliveBackend } from '../types.js'
 
+function hasCaffeinate(): boolean {
+  try {
+    execFileSync('caffeinate', ['-h'], { stdio: 'pipe', timeout: 3000 })
+    return true
+  } catch (e: any) {
+    if (e?.status !== null && e?.status !== undefined) return true
+    return false
+  }
+}
+
 export function createDarwinBackend(): KeepaliveBackend {
+  const available = hasCaffeinate()
+
   return {
     supported() {
-      return true
+      return available
     },
 
     async acquire(): Promise<number> {
-      const child = spawn('caffeinate', ['-dim'], {
+      if (!available) throw new Error('caffeinate not found')
+      const child = spawn('caffeinate', ['-im'], {
         detached: true,
         stdio: 'ignore',
       })

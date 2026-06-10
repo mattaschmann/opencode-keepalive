@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { load, persist, clear, isProcessAlive } from '../src/lock/store.js'
+import { load, persist, clear, isProcessAlive, update } from '../src/lock/store.js'
 
 const TEST_DIR = join(tmpdir(), 'opencode-keepalive-test-' + process.pid)
 
@@ -17,6 +17,8 @@ afterAll(() => {
 
 afterEach(() => {
   rmSync(join(TEST_DIR, 'lock.json'), { force: true })
+  rmSync(join(TEST_DIR, 'lock.json.lock'), { force: true })
+  rmSync(join(TEST_DIR, 'lock.json.tmp'), { force: true })
 })
 
 describe('lock/store', () => {
@@ -26,7 +28,7 @@ describe('lock/store', () => {
   })
 
   it('persists and loads data round-trip', () => {
-    const data = { activeSessions: ['sess-1', 'sess-2'], holderPid: 12345 }
+    const data = { activeSessions: [{ id: 'sess-1', pid: 100 }, { id: 'sess-2', pid: 200 }], holderPid: 12345 }
     persist(data)
     const loaded = load()
     expect(loaded).toEqual(data)
@@ -38,14 +40,24 @@ describe('lock/store', () => {
     expect(data).toEqual({ activeSessions: [], holderPid: null })
   })
 
-  it('filters non-string session IDs', () => {
+  it('discards legacy string[] schema', () => {
     writeFileSync(
       join(TEST_DIR, 'lock.json'),
-      JSON.stringify({ activeSessions: ['valid', 123, null], holderPid: 99 }),
+      JSON.stringify({ activeSessions: ['sess-1', 'sess-2'], holderPid: 99 }),
       'utf8'
     )
     const data = load()
-    expect(data.activeSessions).toEqual(['valid'])
+    expect(data).toEqual({ activeSessions: [], holderPid: null })
+  })
+
+  it('filters invalid session entries', () => {
+    writeFileSync(
+      join(TEST_DIR, 'lock.json'),
+      JSON.stringify({ activeSessions: [{ id: 'valid', pid: 1 }, { id: 123, pid: 2 }, null, { id: 'ok', pid: 'bad' }], holderPid: 99 }),
+      'utf8'
+    )
+    const data = load()
+    expect(data.activeSessions).toEqual([{ id: 'valid', pid: 1 }])
     expect(data.holderPid).toBe(99)
   })
 
@@ -60,7 +72,7 @@ describe('lock/store', () => {
   })
 
   it('clear removes the lock file', () => {
-    persist({ activeSessions: ['x'], holderPid: 1 })
+    persist({ activeSessions: [{ id: 'x', pid: 1 }], holderPid: 1 })
     expect(existsSync(join(TEST_DIR, 'lock.json'))).toBe(true)
     clear()
     expect(existsSync(join(TEST_DIR, 'lock.json'))).toBe(false)
@@ -72,5 +84,46 @@ describe('lock/store', () => {
 
   it('isProcessAlive returns false for non-existent PID', () => {
     expect(isProcessAlive(2147483647)).toBe(false)
+  })
+
+  it('update atomically modifies lock data', () => {
+    persist({ activeSessions: [{ id: 'a', pid: process.pid }], holderPid: null })
+    const result = update((data) => {
+      data.activeSessions.push({ id: 'b', pid: process.pid })
+    })
+    expect(result.activeSessions).toEqual([
+      { id: 'a', pid: process.pid },
+      { id: 'b', pid: process.pid },
+    ])
+    const reloaded = load()
+    expect(reloaded.activeSessions).toEqual(result.activeSessions)
+  })
+
+  it('concurrent updates do not lose entries', async () => {
+    persist({ activeSessions: [], holderPid: null })
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            update((data) => {
+              data.activeSessions.push({ id: `s${i}`, pid: process.pid })
+            })
+            resolve()
+          }, i * 2)
+        })
+      )
+    )
+
+    const final = load()
+    expect(final.activeSessions).toHaveLength(10)
+  })
+
+  it('persist is atomic (no torn reads via rename)', () => {
+    const data = { activeSessions: [{ id: 'x', pid: 1 }], holderPid: 42 }
+    persist(data)
+    expect(existsSync(join(TEST_DIR, 'lock.json.tmp'))).toBe(false)
+    const loaded = load()
+    expect(loaded).toEqual(data)
   })
 })

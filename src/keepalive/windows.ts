@@ -11,7 +11,8 @@ public class WakeLock {
     public static extern uint SetThreadExecutionState(uint esFlags);
 }
 "@
-[WakeLock]::SetThreadExecutionState(0x80000003) | Out-Null
+# ES_CONTINUOUS (0x80000000) | ES_SYSTEM_REQUIRED (0x00000001)
+[WakeLock]::SetThreadExecutionState(0x80000001) | Out-Null
 while ($true) { Start-Sleep -Seconds 60 }
 `
 

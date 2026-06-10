@@ -1,7 +1,12 @@
 export type Platform = 'darwin' | 'wsl2' | 'linux' | 'win32'
 
+export interface SessionEntry {
+  id: string
+  pid: number
+}
+
 export interface LockData {
-  activeSessions: string[]
+  activeSessions: SessionEntry[]
   holderPid: number | null
 }
 

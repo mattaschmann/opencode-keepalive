@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals'
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -32,7 +32,11 @@ beforeEach(() => {
   mockSupported = jest.fn<any>().mockReturnValue(true)
   mockLog.mockClear()
   rmSync(join(TEST_DIR, 'lock.json'), { force: true })
+  rmSync(join(TEST_DIR, 'lock.json.lock'), { force: true })
+  rmSync(join(TEST_DIR, 'lock.json.tmp'), { force: true })
   jest.resetModules()
+  const g = globalThis as any
+  delete g[Symbol.for('opencode-keepalive')]
 })
 
 async function loadPlugin() {
@@ -122,5 +126,54 @@ describe('ref counting', () => {
 
     await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'ghost', status: { type: 'idle' } } } })
     expect(mockRelease).not.toHaveBeenCalled()
+  })
+
+  it('concurrent busy events for different sessions only acquire once', async () => {
+    const hooks = await loadPlugin()
+
+    await Promise.all([
+      hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'c1', status: { type: 'busy' } } } }),
+      hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'c2', status: { type: 'busy' } } } }),
+    ])
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+  })
+
+  it('records session entries with pid in lock file', async () => {
+    const hooks = await loadPlugin()
+
+    await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'sess-abc', status: { type: 'busy' } } } })
+
+    const raw = JSON.parse(readFileSync(join(TEST_DIR, 'lock.json'), 'utf8'))
+    expect(raw.activeSessions).toEqual([{ id: 'sess-abc', pid: process.pid }])
+  })
+
+  it('does not release holder while another live process holds a session', async () => {
+    const { persist } = await import('../src/lock/store.js')
+    persist({
+      activeSessions: [{ id: 'other-sess', pid: process.pid }],
+      holderPid: process.pid,
+    })
+
+    const hooks = await loadPlugin()
+
+    await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'my-sess', status: { type: 'busy' } } } })
+    await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'my-sess', status: { type: 'idle' } } } })
+
+    expect(mockRelease).not.toHaveBeenCalled()
+  })
+
+  it('reaps sessions from dead processes and releases holder', async () => {
+    const { persist } = await import('../src/lock/store.js')
+    persist({
+      activeSessions: [{ id: 'orphan-sess', pid: 2147483647 }],
+      holderPid: process.pid,
+    })
+
+    const hooks = await loadPlugin()
+
+    await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'live-sess', status: { type: 'busy' } } } })
+    await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'live-sess', status: { type: 'idle' } } } })
+
+    expect(mockRelease).toHaveBeenCalled()
   })
 })
