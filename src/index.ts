@@ -126,9 +126,7 @@ function createSharedHandler(client: any): SharedHandler {
 
     const pidsToKill = new Set<number>()
     if (ownHolderPid !== null) pidsToKill.add(ownHolderPid)
-    if (lock.holderPid !== null && (lock.holderPid === ownHolderPid || !isProcessAlive(lock.holderPid))) {
-      pidsToKill.add(lock.holderPid)
-    }
+    if (lock.holderPid !== null) pidsToKill.add(lock.holderPid)
 
     for (const pid of pidsToKill) {
       await be.release(pid)
