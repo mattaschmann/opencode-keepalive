@@ -1,4 +1,5 @@
-import { spawn, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
+import { killPid, spawnDetached } from './shared.js'
 import type { KeepaliveBackend } from '../types.js'
 
 function hasCaffeinate(): boolean {
@@ -21,21 +22,11 @@ export function createDarwinBackend(): KeepaliveBackend {
 
     async acquire(): Promise<number> {
       if (!available) throw new Error('caffeinate not found')
-      const child = spawn('caffeinate', ['-im'], {
-        detached: true,
-        stdio: 'ignore',
-      })
-      child.unref()
-      if (!child.pid) throw new Error('failed to spawn caffeinate')
-      return child.pid
+      return spawnDetached('caffeinate', ['-im'])
     },
 
     async release(pid: number): Promise<void> {
-      try {
-        process.kill(pid)
-      } catch {
-        /* already dead */
-      }
+      killPid(pid)
     },
   }
 }

@@ -144,13 +144,16 @@ describe('ref counting', () => {
     await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'sess-abc', status: { type: 'busy' } } } })
 
     const raw = JSON.parse(readFileSync(join(TEST_DIR, 'lock.json'), 'utf8'))
-    expect(raw.activeSessions).toEqual([{ id: 'sess-abc', pid: process.pid }])
+    expect(raw.activeSessions).toHaveLength(1)
+    expect(raw.activeSessions[0].id).toBe('sess-abc')
+    expect(raw.activeSessions[0].pid).toBe(process.pid)
+    expect(typeof raw.activeSessions[0].lastSeen).toBe('number')
   })
 
   it('does not release holder while another live process holds a session', async () => {
     const { persist } = await import('../src/lock/store.js')
     persist({
-      activeSessions: [{ id: 'other-sess', pid: process.pid }],
+      activeSessions: [{ id: 'other-sess', pid: process.pid, lastSeen: Date.now() }],
       holderPid: process.pid,
     })
 
@@ -165,7 +168,7 @@ describe('ref counting', () => {
   it('reaps sessions from dead processes and releases holder', async () => {
     const { persist } = await import('../src/lock/store.js')
     persist({
-      activeSessions: [{ id: 'orphan-sess', pid: 2147483647 }],
+      activeSessions: [{ id: 'orphan-sess', pid: 2147483647, lastSeen: Date.now() }],
       holderPid: process.pid,
     })
 

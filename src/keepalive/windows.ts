@@ -1,5 +1,5 @@
-import { spawn } from 'node:child_process'
 import { execFileSync } from 'node:child_process'
+import { killPid, spawnDetached } from './shared.js'
 import type { KeepaliveBackend } from '../types.js'
 
 const PS_SCRIPT = `
@@ -38,26 +38,15 @@ export function createWindowsBackend(): KeepaliveBackend {
 
     async acquire(): Promise<number> {
       if (!psPath) throw new Error('powershell.exe not found')
-      const child = spawn(
+      return spawnDetached(
         psPath,
         ['-NoProfile', '-NonInteractive', '-Command', PS_SCRIPT],
-        {
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true,
-        }
+        { windowsHide: true },
       )
-      child.unref()
-      if (!child.pid) throw new Error('failed to spawn powershell ES holder')
-      return child.pid
     },
 
     async release(pid: number): Promise<void> {
-      try {
-        process.kill(pid)
-      } catch {
-        /* already dead — fine */
-      }
+      killPid(pid)
     },
   }
 }

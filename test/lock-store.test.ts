@@ -28,7 +28,8 @@ describe('lock/store', () => {
   })
 
   it('persists and loads data round-trip', () => {
-    const data = { activeSessions: [{ id: 'sess-1', pid: 100 }, { id: 'sess-2', pid: 200 }], holderPid: 12345 }
+    const now = Date.now()
+    const data = { activeSessions: [{ id: 'sess-1', pid: 100, lastSeen: now }, { id: 'sess-2', pid: 200, lastSeen: now }], holderPid: 12345 }
     persist(data)
     const loaded = load()
     expect(loaded).toEqual(data)
@@ -57,7 +58,10 @@ describe('lock/store', () => {
       'utf8'
     )
     const data = load()
-    expect(data.activeSessions).toEqual([{ id: 'valid', pid: 1 }])
+    expect(data.activeSessions).toHaveLength(1)
+    expect(data.activeSessions[0]!.id).toBe('valid')
+    expect(data.activeSessions[0]!.pid).toBe(1)
+    expect(typeof data.activeSessions[0]!.lastSeen).toBe('number')
     expect(data.holderPid).toBe(99)
   })
 
@@ -72,7 +76,7 @@ describe('lock/store', () => {
   })
 
   it('clear removes the lock file', () => {
-    persist({ activeSessions: [{ id: 'x', pid: 1 }], holderPid: 1 })
+    persist({ activeSessions: [{ id: 'x', pid: 1, lastSeen: Date.now() }], holderPid: 1 })
     expect(existsSync(join(TEST_DIR, 'lock.json'))).toBe(true)
     clear()
     expect(existsSync(join(TEST_DIR, 'lock.json'))).toBe(false)
@@ -87,13 +91,14 @@ describe('lock/store', () => {
   })
 
   it('update atomically modifies lock data', () => {
-    persist({ activeSessions: [{ id: 'a', pid: process.pid }], holderPid: null })
+    const now = Date.now()
+    persist({ activeSessions: [{ id: 'a', pid: process.pid, lastSeen: now }], holderPid: null })
     const result = update((data) => {
-      data.activeSessions.push({ id: 'b', pid: process.pid })
+      data.activeSessions.push({ id: 'b', pid: process.pid, lastSeen: now })
     })
     expect(result.activeSessions).toEqual([
-      { id: 'a', pid: process.pid },
-      { id: 'b', pid: process.pid },
+      { id: 'a', pid: process.pid, lastSeen: now },
+      { id: 'b', pid: process.pid, lastSeen: now },
     ])
     const reloaded = load()
     expect(reloaded.activeSessions).toEqual(result.activeSessions)
@@ -107,7 +112,7 @@ describe('lock/store', () => {
         new Promise<void>((resolve) => {
           setTimeout(() => {
             update((data) => {
-              data.activeSessions.push({ id: `s${i}`, pid: process.pid })
+              data.activeSessions.push({ id: `s${i}`, pid: process.pid, lastSeen: Date.now() })
             })
             resolve()
           }, i * 2)
@@ -120,10 +125,24 @@ describe('lock/store', () => {
   })
 
   it('persist is atomic (no torn reads via rename)', () => {
-    const data = { activeSessions: [{ id: 'x', pid: 1 }], holderPid: 42 }
+    const now = Date.now()
+    const data = { activeSessions: [{ id: 'x', pid: 1, lastSeen: now }], holderPid: 42 }
     persist(data)
     expect(existsSync(join(TEST_DIR, 'lock.json.tmp'))).toBe(false)
     const loaded = load()
     expect(loaded).toEqual(data)
+  })
+
+  it('loads old lock files without lastSeen (back-compat)', () => {
+    writeFileSync(
+      join(TEST_DIR, 'lock.json'),
+      JSON.stringify({ activeSessions: [{ id: 'old', pid: 1 }], holderPid: null }),
+      'utf8'
+    )
+    const data = load()
+    expect(data.activeSessions).toHaveLength(1)
+    expect(data.activeSessions[0]!.id).toBe('old')
+    expect(data.activeSessions[0]!.pid).toBe(1)
+    expect(typeof data.activeSessions[0]!.lastSeen).toBe('number')
   })
 })

@@ -1,10 +1,9 @@
 import { jest } from '@jest/globals'
-import { mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { spawn, type ChildProcess } from 'node:child_process'
 
-const TEST_DIR = join(tmpdir(), 'opencode-keepalive-crossproc-' + process.pid)
+const TEST_DIR = join(tmpdir(), 'opencode-keepalive-heartbeat-' + process.pid)
 
 const mockLog = jest.fn<any>().mockReturnValue(Promise.resolve())
 const mockClient = {
@@ -17,19 +16,22 @@ let mockAcquire: jest.Mock<any>
 let mockRelease: jest.Mock<any>
 let mockSupported: jest.Mock<any>
 
-let holderProcess: ChildProcess | null = null
-
 beforeAll(() => {
   mkdirSync(TEST_DIR, { recursive: true })
   process.env.OPENCODE_KEEPALIVE_CACHE_DIR = TEST_DIR
+  process.env.OPENCODE_KEEPALIVE_STALE_MS = '200'
+  process.env.OPENCODE_KEEPALIVE_HEARTBEAT_MS = '50'
 })
 
 afterAll(() => {
   delete process.env.OPENCODE_KEEPALIVE_CACHE_DIR
+  delete process.env.OPENCODE_KEEPALIVE_STALE_MS
+  delete process.env.OPENCODE_KEEPALIVE_HEARTBEAT_MS
   rmSync(TEST_DIR, { recursive: true, force: true })
 })
 
 beforeEach(() => {
+  mockAcquire = jest.fn<any>().mockResolvedValue(process.pid)
   mockRelease = jest.fn<any>().mockResolvedValue(undefined)
   mockSupported = jest.fn<any>().mockReturnValue(true)
   mockLog.mockClear()
@@ -39,18 +41,6 @@ beforeEach(() => {
   jest.resetModules()
   const g = globalThis as any
   delete g[Symbol.for('opencode-keepalive')]
-
-  holderProcess = spawn('sleep', ['120'], { detached: true, stdio: 'ignore' })
-  holderProcess.unref()
-
-  mockAcquire = jest.fn<any>().mockResolvedValue(holderProcess!.pid!)
-})
-
-afterEach(() => {
-  if (holderProcess?.pid) {
-    try { process.kill(holderProcess.pid) } catch {}
-  }
-  holderProcess = null
 })
 
 async function loadPlugin() {
@@ -79,49 +69,67 @@ async function loadPlugin() {
   }))
 
   jest.unstable_mockModule('../src/platform.js', () => ({
-    detectPlatform: () => 'wsl2',
+    detectPlatform: () => 'linux',
   }))
 
   const { default: plugin } = await import('../src/index.js')
   return plugin({ client: mockClient } as any)
 }
 
-describe('cross-process ref counting', () => {
-  it('startup reaps dead foreign sessions and releases the orphaned holder', async () => {
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+describe('heartbeat and stale session reaping', () => {
+  it('reaps stale sessions whose lastSeen exceeds STALE_SESSION_MS', async () => {
     const { persist, load } = await import('../src/lock/store.js')
-    const FOREIGN_PID = 2147483646
 
     persist({
-      activeSessions: [{ id: 'foreign-sess', pid: FOREIGN_PID, lastSeen: Date.now() }],
-      holderPid: holderProcess!.pid!,
+      activeSessions: [{ id: 'stale-sess', pid: process.pid, lastSeen: Date.now() - 10_000 }],
+      holderPid: null,
     })
 
     await loadPlugin()
 
-    expect(mockRelease).toHaveBeenCalledWith(holderProcess!.pid!)
     const lock = load()
-    expect(lock.holderPid).toBeNull()
-    expect(lock.activeSessions).toHaveLength(0)
+    expect(lock.activeSessions.find((e) => e.id === 'stale-sess')).toBeUndefined()
   })
 
-  it('does not orphan holder when non-owning instance drains all sessions via dispose', async () => {
-    const { persist, load } = await import('../src/lock/store.js')
+  it('startup releases an orphaned-but-alive holder when sessions are empty', async () => {
+    const { spawn: realSpawn } = await import('node:child_process')
+    const holder = realSpawn('sleep', ['120'], { detached: true, stdio: 'ignore' })
+    holder.unref()
 
-    persist({
-      activeSessions: [{ id: 'local-sess', pid: process.pid, lastSeen: Date.now() }],
-      holderPid: holderProcess!.pid!,
-    })
+    try {
+      const { persist, load } = await import('../src/lock/store.js')
 
-    mockAcquire.mockResolvedValue(holderProcess!.pid!)
+      persist({
+        activeSessions: [],
+        holderPid: holder.pid!,
+      })
 
+      await loadPlugin()
+
+      const lock = load()
+      expect(lock.holderPid).toBeNull()
+    } finally {
+      try { process.kill(holder.pid!) } catch {}
+    }
+  })
+
+  it('heartbeat refreshes lastSeen for own sessions', async () => {
     const hooks = await loadPlugin()
 
-    await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'local-sess', status: { type: 'busy' } } } })
-    await hooks.dispose!()
+    await hooks.event!({ event: { type: 'session.status', properties: { sessionID: 'hb-sess', status: { type: 'busy' } } } })
 
-    expect(mockRelease).toHaveBeenCalledWith(holderProcess!.pid!)
-    const lock = load()
-    expect(lock.holderPid).toBeNull()
-    expect(lock.activeSessions).toHaveLength(0)
+    const { load } = await import('../src/lock/store.js')
+    const before = load().activeSessions.find((e) => e.id === 'hb-sess')!.lastSeen
+
+    await sleep(100)
+
+    const after = load().activeSessions.find((e) => e.id === 'hb-sess')!.lastSeen
+    expect(after).toBeGreaterThan(before)
+
+    await hooks.dispose!()
   })
 })

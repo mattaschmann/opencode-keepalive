@@ -1,4 +1,5 @@
-import { spawn, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
+import { killPid, spawnDetached } from './shared.js'
 import type { KeepaliveBackend } from '../types.js'
 
 function hasSystemdInhibit(): boolean {
@@ -20,22 +21,14 @@ export function createLinuxBackend(): KeepaliveBackend {
 
     async acquire(): Promise<number> {
       if (!hasInhibit) throw new Error('systemd-inhibit not available')
-      const child = spawn(
+      return spawnDetached(
         'systemd-inhibit',
         ['--what=idle:sleep', '--why=opencode AI job', 'sleep', 'infinity'],
-        { detached: true, stdio: 'ignore' }
       )
-      child.unref()
-      if (!child.pid) throw new Error('failed to spawn systemd-inhibit')
-      return child.pid
     },
 
     async release(pid: number): Promise<void> {
-      try {
-        process.kill(pid)
-      } catch {
-        /* already dead */
-      }
+      killPid(pid)
     },
   }
 }

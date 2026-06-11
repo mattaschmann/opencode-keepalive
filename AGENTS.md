@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-OpenCode plugin that prevents the host machine from sleeping (system/disk sleep only, not display) while AI sessions are active. Uses SetThreadExecutionState on Windows/WSL2, caffeinate on macOS, systemd-inhibit on Linux. Cross-process reference counting via ~/.cache/opencode-keepalive/lock.json with heartbeat re-spawn of a detached holder process.
+OpenCode plugin that prevents the host machine from sleeping (system/disk sleep only, not display) while AI sessions are active. Uses SetThreadExecutionState on Windows/WSL2, caffeinate on macOS, systemd-inhibit on Linux. Cross-process reference counting via ~/.cache/opencode-keepalive/lock.json with a periodic heartbeat reaper that detects dead/stale sessions and releases orphaned holder processes.
 
 ## Do
 
@@ -30,11 +30,12 @@ Note: No build step — plugin is shipped as TypeScript source, loaded directly 
 
 ## Project Structure
 
-- `src/index.ts` - Main plugin entry (event hook, ref counting, heartbeat)
+- `src/index.ts` - Main plugin entry (event hook, ref counting, heartbeat reaper)
 - `src/constants.ts` - Service name, cache directory/file constants
-- `src/types.ts` - Platform, LockData, KeepaliveBackend types
+- `src/types.ts` - Platform, LockData, SessionEntry, KeepaliveBackend types
 - `src/platform.ts` - Platform detection (darwin/wsl2/linux/win32)
 - `src/lock/store.ts` - Read/write/validate ~/.cache/opencode-keepalive/lock.json
+- `src/keepalive/shared.ts` - Shared helpers (killPid, spawnDetached)
 - `src/keepalive/windows.ts` - SetThreadExecutionState via powershell.exe
 - `src/keepalive/darwin.ts` - caffeinate backend
 - `src/keepalive/linux.ts` - systemd-inhibit backend
@@ -53,3 +54,5 @@ Note: No build step — plugin is shipped as TypeScript source, loaded directly 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `OPENCODE_KEEPALIVE_CACHE_DIR` | `~/.cache/opencode-keepalive` | Override lock file directory (mainly for testing) |
+| `OPENCODE_KEEPALIVE_HEARTBEAT_MS` | `30000` | Heartbeat interval for reaping stale sessions |
+| `OPENCODE_KEEPALIVE_STALE_MS` | `600000` | Max age (ms) before a session is considered stale (PID-recycle defense) |

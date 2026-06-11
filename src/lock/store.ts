@@ -8,6 +8,9 @@ const LOCK_STALE_MS = 5000
 const LOCK_RETRY_MS = 20
 const LOCK_MAX_RETRIES = 100
 
+export const STALE_SESSION_MS = Number(process.env.OPENCODE_KEEPALIVE_STALE_MS) || 10 * 60 * 1000
+export const HEARTBEAT_MS = Number(process.env.OPENCODE_KEEPALIVE_HEARTBEAT_MS) || 30_000
+
 export function getLockPath(): string {
   const base = process.env.OPENCODE_KEEPALIVE_CACHE_DIR || join(homedir(), '.cache', CACHE.DIR)
   return join(base, CACHE.FILE)
@@ -29,7 +32,7 @@ function parseEntry(raw: unknown): SessionEntry | null {
   if (!raw || typeof raw !== 'object') return null
   const e = raw as Record<string, unknown>
   if (typeof e.id !== 'string' || typeof e.pid !== 'number') return null
-  return { id: e.id, pid: e.pid }
+  return { id: e.id, pid: e.pid, lastSeen: typeof e.lastSeen === 'number' ? e.lastSeen : Date.now() }
 }
 
 export function load(): LockData {
