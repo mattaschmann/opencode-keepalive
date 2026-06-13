@@ -78,3 +78,15 @@ this authoritative source rather than blindly touching them.
   - Session ID absent from the map → treated as gone, removed.
   - Sessions still busy but holder PID is dead → `ensureHolder` re-acquires on heartbeat.
 - [x] Run `npm run typecheck && npm test` — confirm green.
+
+---
+
+## Note (2026-06-13)
+
+The `client.session.status()` heartbeat reconcile added in this task (commit
+`227a4db`) was reverted by `.tasks/revert-keepalive-reconcile.md`. A self-test
+proved the polling endpoint reports `idle` during tool calls (not just at turn
+end), causing the heartbeat to drop the wake lock mid-turn for any tool call
+longer than the 30s heartbeat interval. The event-driven model
+(busy/retry → acquire, idle/session.idle/deleted/error → release) is sound; the
+polling endpoint is not.

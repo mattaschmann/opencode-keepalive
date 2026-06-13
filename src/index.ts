@@ -164,26 +164,7 @@ function createSharedHandler(client: any): SharedHandler {
   }
 
   async function onHeartbeat(): Promise<void> {
-    try {
-      const result = await client.session.status()
-      const statuses: Record<string, { type: string }> | undefined = result?.data
-      if (!statuses) {
-        update((data) => { touchOwnSessions(data) })
-      } else {
-        const now = Date.now()
-        update((data) => {
-          data.activeSessions = data.activeSessions.filter((entry) => {
-            if (entry.pid !== process.pid) return true
-            const s = statuses[entry.id]
-            if (!s || s.type === 'idle') return false
-            entry.lastSeen = now
-            return true
-          })
-        })
-      }
-    } catch {
-      update((data) => { touchOwnSessions(data) })
-    }
+    update((data) => { touchOwnSessions(data) })
 
     const lock = load()
     if (lock.activeSessions.length > 0) {
@@ -238,6 +219,14 @@ function createSharedHandler(client: any): SharedHandler {
           if (nowEmpty) {
             await releaseHolder()
           }
+        }
+      }
+
+      if (event.type === 'session.idle') {
+        const sessionID = event.properties?.sessionID
+        if (sessionID) {
+          const nowEmpty = removeSession(sessionID)
+          if (nowEmpty) await releaseHolder()
         }
       }
 
