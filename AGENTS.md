@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-OpenCode plugin that prevents the host machine from sleeping (system/disk sleep only, not display) while AI sessions are active. Uses SetThreadExecutionState on Windows/WSL2, caffeinate on macOS, systemd-inhibit on Linux. Cross-process reference counting via ~/.cache/opencode-keepalive/lock.json with a periodic heartbeat reaper that detects dead/stale sessions and releases orphaned holder processes.
+OpenCode plugin that prevents the host machine from sleeping (system/disk sleep only, not display) while AI sessions are active. Uses SetThreadExecutionState on Windows/WSL2, caffeinate on macOS, systemd-inhibit on Linux. Cross-process reference counting via ~/.cache/opencode-keepalive/lock.json. A periodic heartbeat reconciles tracked sessions against the authoritative `client.session.status()` map — evicting sessions the server reports as `idle` and re-acquiring a holder if it dies while sessions remain busy. Dead/stale PID reaping is retained as a fallback for sessions the SDK cannot reach.
 
 ## Do
 

@@ -163,10 +163,34 @@ function createSharedHandler(client: any): SharedHandler {
     return result.activeSessions.length === 0
   }
 
-  function onHeartbeat(): void {
-    update((data) => { touchOwnSessions(data) })
-    const orphan = reapDead()
-    releaseOrphan(orphan).catch(() => {})
+  async function onHeartbeat(): Promise<void> {
+    try {
+      const result = await client.session.status()
+      const statuses: Record<string, { type: string }> | undefined = result?.data
+      if (!statuses) {
+        update((data) => { touchOwnSessions(data) })
+      } else {
+        const now = Date.now()
+        update((data) => {
+          data.activeSessions = data.activeSessions.filter((entry) => {
+            if (entry.pid !== process.pid) return true
+            const s = statuses[entry.id]
+            if (!s || s.type === 'idle') return false
+            entry.lastSeen = now
+            return true
+          })
+        })
+      }
+    } catch {
+      update((data) => { touchOwnSessions(data) })
+    }
+
+    const lock = load()
+    if (lock.activeSessions.length > 0) {
+      await ensureHolder()
+    } else {
+      await releaseHolder()
+    }
   }
 
   function syncCleanup(): void {
@@ -187,7 +211,7 @@ function createSharedHandler(client: any): SharedHandler {
   }
 
   installExitHandlers()
-  heartbeatTimer = setInterval(onHeartbeat, HEARTBEAT_MS)
+  heartbeatTimer = setInterval(() => { onHeartbeat().catch(() => {}) }, HEARTBEAT_MS)
   heartbeatTimer.unref()
   const ready = (async () => {
     await releaseOrphan(reapDead())
