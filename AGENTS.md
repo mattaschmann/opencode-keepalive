@@ -2,15 +2,15 @@
 
 ## Project Overview
 
-OpenCode plugin that prevents the host machine from sleeping (system/disk sleep only, not display) while AI sessions are active. Uses SetThreadExecutionState on Windows/WSL2, caffeinate on macOS, systemd-inhibit on Linux. Cross-process reference counting via ~/.cache/opencode-keepalive/lock.json. Acquires the wake lock on busy/retry session events; releases on idle/session.idle/deleted/error events. A periodic heartbeat reaps dead-PID/stale sessions, releases orphaned holders, and re-acquires a holder that died mid-turn — but never polls or evicts live sessions.
+OpenCode **V2** plugin that prevents the host machine from sleeping (system/disk sleep only, not display) while AI sessions are busy. Uses SetThreadExecutionState on Windows/WSL2, caffeinate on macOS, systemd-inhibit on Linux. State is a single in-process `Set` of busy session IDs (V2 runs one persistent background service that owns all sessions, so no cross-process file lock is needed). Acquires the wake lock on the first `session.execution.started`; releases when the last session finishes via `session.execution.succeeded` / `.failed` / `.interrupted` (or `session.deleted`). NOTE: V2 2.0.8 does **not** emit `session.status`/`session.idle` on the public stream — `session.execution.*` is the busy signal. The inhibitor watches this server process and self-terminates if it is killed — `caffeinate -w <pid>` on macOS, a parent-held stdin pipe (EOF on server death) on Linux/Windows — so a SIGKILLed server cannot orphan the assertion. A `Symbol.for('opencode-keepalive')` singleton shares one handler across duplicate plugin instances in the same process.
 
 ## Do
 
 - Use TypeScript for all source files
-- Use `@opencode-ai/plugin` for type definitions
+- Use `@opencode/plugin` (V2) for type definitions; export `Plugin.define({ id, setup })`
 - Keep `src/index.ts` as the main entry point; delegate to submodules
 - Run `npm run typecheck` and `npm test` before presenting changes
-- Fail quiet — log via `client.app.log`, fall back to stderr; never throw from event handlers
+- Fail quiet — log via `src/log.ts` (stderr); never throw from the event loop or cleanup
 - Use `.js` extensions in all relative imports
 
 ## Don't
@@ -18,6 +18,7 @@ OpenCode plugin that prevents the host machine from sleeping (system/disk sleep 
 - Add heavy or unnecessary dependencies
 - Use default exports for anything other than the main plugin
 - Hardcode power plan restore values on Windows
+- Reintroduce a cross-process file lock or polling heartbeat — the inhibitor's PID/stdin watch is the orphan guard
 - Make large speculative changes without confirming with the user
 
 ## Commands
@@ -30,29 +31,21 @@ Note: No build step — plugin is shipped as TypeScript source, loaded directly 
 
 ## Project Structure
 
-- `src/index.ts` - Main plugin entry (event hook, ref counting, heartbeat reaper)
-- `src/constants.ts` - Service name, cache directory/file constants
-- `src/types.ts` - Platform, LockData, SessionEntry, KeepaliveBackend types
+- `src/index.ts` - Main plugin entry (`Plugin.define`, event subscription, in-process session set, acquire/release)
+- `src/constants.ts` - Service name
+- `src/log.ts` - Single logging seam (stderr)
+- `src/types.ts` - Platform, KeepaliveBackend types
 - `src/platform.ts` - Platform detection (darwin/wsl2/linux/win32)
-- `src/lock/store.ts` - Read/write/validate ~/.cache/opencode-keepalive/lock.json
-- `src/keepalive/shared.ts` - Shared helpers (killPid, spawnDetached)
-- `src/keepalive/windows.ts` - SetThreadExecutionState via powershell.exe
-- `src/keepalive/darwin.ts` - caffeinate backend
-- `src/keepalive/linux.ts` - systemd-inhibit backend
+- `src/keepalive/shared.ts` - Shared helpers (killPid, spawnDetached w/ optional piped stdin)
+- `src/keepalive/windows.ts` - SetThreadExecutionState via powershell.exe (stdin-EOF release)
+- `src/keepalive/darwin.ts` - caffeinate backend (`-i -m -w <pid>`)
+- `src/keepalive/linux.ts` - systemd-inhibit backend (stdin-EOF release)
 - `test/` - Jest test suites
 
 ## Testing
 
 - Jest tests use ESM mode with ts-jest
-- Test lock store: round-trip, corrupt JSON recovery, type filtering, clear
+- Test ref counting: acquire/release transitions, cleanup, multi-instance dedup (feed `session.execution.*` events through a fake `ctx.event.subscribe`)
+- Test backends: assert argv + piped-stdin/watch-pid per platform (`darwin.test.ts`, `backends.test.ts`)
 - Test platform detection: mock node:os per test with resetModules
-- Test ref counting: acquire/release transitions, dispose, idempotence
 - Run `npm test` and `npm run typecheck` before submitting
-
-## Environment Variables
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `OPENCODE_KEEPALIVE_CACHE_DIR` | `~/.cache/opencode-keepalive` | Override lock file directory (mainly for testing) |
-| `OPENCODE_KEEPALIVE_HEARTBEAT_MS` | `30000` | Heartbeat interval for reaping stale sessions |
-| `OPENCODE_KEEPALIVE_STALE_MS` | `600000` | Max age (ms) before a session is considered stale (PID-recycle defense) |

@@ -1,284 +1,203 @@
-import { SERVICE } from './constants.js'
-import { detectPlatform } from './platform.js'
-import { load, update, isProcessAlive, STALE_SESSION_MS, HEARTBEAT_MS } from './lock/store.js'
-import { createWindowsBackend } from './keepalive/windows.js'
-import { createDarwinBackend } from './keepalive/darwin.js'
-import { createLinuxBackend } from './keepalive/linux.js'
-import type { KeepaliveBackend } from './types.js'
+// opencode-keepalive — prevents host system/disk sleep (not display) while an
+// OpenCode session is busy. V2 runs one persistent background service that owns
+// all sessions, so state is a single in-process Set; the per-platform inhibitor
+// watches this server process and self-terminates if it is killed (orphan
+// guard). A Symbol.for singleton shares one handler across multiple plugin
+// instances loaded into the same process.
+import { Plugin } from "@opencode/plugin";
+import { detectPlatform } from "./platform.js";
+import { log } from "./log.js";
+import { createWindowsBackend } from "./keepalive/windows.js";
+import { createDarwinBackend } from "./keepalive/darwin.js";
+import { createLinuxBackend } from "./keepalive/linux.js";
+import type { KeepaliveBackend } from "./types.js";
 
-type LogFn = (level: 'debug' | 'info' | 'warn' | 'error', message: string, extra?: Record<string, unknown>) => void
-
-const KEY = Symbol.for('opencode-keepalive')
+const KEY = Symbol.for("opencode-keepalive");
 
 interface SharedHandler {
-  event(args: { event: any }): Promise<void>
-  dispose(): Promise<void>
-  ready: Promise<void>
+  /** Route one server event into the wake-lock state machine. */
+  handle(event: { type: string; data?: any }): Promise<void>;
+  /** Attach a setup instance; returns its cleanup. Last cleanup releases. */
+  attach(): () => Promise<void>;
 }
 
 function getBackend(): KeepaliveBackend | null {
-  const platform = detectPlatform()
-  switch (platform) {
-    case 'wsl2':
-    case 'win32':
-      return createWindowsBackend()
-    case 'darwin':
-      return createDarwinBackend()
-    case 'linux':
-      return createLinuxBackend()
+  switch (detectPlatform()) {
+    case "wsl2":
+    case "win32":
+      return createWindowsBackend();
+    case "darwin":
+      return createDarwinBackend();
+    case "linux":
+      return createLinuxBackend();
     default:
-      return null
+      return null;
   }
 }
 
-function createSharedHandler(client: any): SharedHandler {
-  const log: LogFn = (level, message, extra) => {
-    client.app.log({ body: { service: SERVICE, level, message, extra } }).catch(() => {
-      process.stderr.write(`${SERVICE}: [${level}] ${message}\n`)
-    })
-  }
-
-  const backend = getBackend()
-  const platform = detectPlatform()
+function createSharedHandler(): SharedHandler {
+  const platform = detectPlatform();
+  const backend = getBackend();
 
   if (!backend || !backend.supported()) {
-    log('warn', `unsupported or unavailable platform: ${platform}`)
+    log("warn", `unsupported or unavailable platform: ${platform}`);
+    let noopRefs = 0;
     return {
-      ready: Promise.resolve(),
-      async event({ event }: { event: any }) {
-        if (event.type.startsWith('session.')) {
-          log('debug', `event: ${event.type}`, { properties: event.properties })
-        }
+      async handle() {},
+      attach() {
+        noopRefs++;
+        return async () => {
+          noopRefs--;
+        };
       },
-      async dispose() {},
-    }
+    };
   }
 
-  log('info', `plugin loaded, platform: ${platform}`)
+  log("info", `plugin loaded, platform: ${platform}`);
 
-  const be = backend!
-  let ownHolderPid: number | null = null
-  let inflightOp: Promise<void> | null = null
-  let disposed = false
-  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
-
-  function touchOwnSessions(data: { activeSessions: { id: string; pid: number; lastSeen: number }[] }): void {
-    const now = Date.now()
-    for (const entry of data.activeSessions) {
-      if (entry.pid === process.pid) entry.lastSeen = now
-    }
-  }
-
-  function reapDead(): number | null {
-    let orphanedHolder: number | null = null
-    update((data) => {
-      const now = Date.now()
-      data.activeSessions = data.activeSessions.filter((e) =>
-        isProcessAlive(e.pid) && (now - e.lastSeen < STALE_SESSION_MS),
-      )
-      if (data.activeSessions.length === 0 && data.holderPid !== null) {
-        orphanedHolder = data.holderPid
-        data.holderPid = null
-        ownHolderPid = null
-      }
-    })
-    return orphanedHolder
-  }
-
-  async function releaseOrphan(pid: number | null): Promise<void> {
-    if (pid === null) return
-    await be.release(pid)
-    log('info', 'wake lock released (orphan)', { pid })
-  }
+  const be = backend;
+  const busySessions = new Set<string>();
+  let holderPid: number | null = null;
+  let inflightOp: Promise<void> | null = null;
+  let refs = 0;
+  let exitHandlerInstalled = false;
 
   async function runExclusive(fn: () => Promise<void>): Promise<void> {
-    if (inflightOp) await inflightOp
-    inflightOp = fn()
+    if (inflightOp) await inflightOp;
+    inflightOp = fn();
     try {
-      await inflightOp
+      await inflightOp;
     } finally {
-      inflightOp = null
+      inflightOp = null;
     }
   }
 
   async function ensureHolder(): Promise<void> {
     return runExclusive(async () => {
-      await releaseOrphan(reapDead())
-      const lock = load()
-      if (lock.activeSessions.length === 0) return
-
-      if (ownHolderPid !== null && isProcessAlive(ownHolderPid)) return
-      if (lock.holderPid !== null && lock.holderPid !== ownHolderPid && isProcessAlive(lock.holderPid)) {
-        ownHolderPid = lock.holderPid
-        return
-      }
-
+      if (busySessions.size === 0) return;
+      if (holderPid !== null) return;
       try {
-        const pid = await be.acquire()
-        ownHolderPid = pid
-        update((data) => { data.holderPid = pid })
-        log('info', 'wake lock acquired', { pid })
+        // Watch this server process; the inhibitor releases if we die.
+        holderPid = await be.acquire(process.pid);
+        log("info", "wake lock acquired", { pid: holderPid });
       } catch (e) {
-        log('error', `failed to acquire wake lock: ${e}`)
+        log("error", `failed to acquire wake lock: ${e}`);
       }
-    })
+    });
   }
 
   async function releaseHolder(): Promise<void> {
     return runExclusive(async () => {
-      await releaseOrphan(reapDead())
-      const lock = load()
-      if (lock.activeSessions.length > 0) return
-
-      const pidsToKill = new Set<number>()
-      if (ownHolderPid !== null) pidsToKill.add(ownHolderPid)
-      if (lock.holderPid !== null) pidsToKill.add(lock.holderPid)
-
-      for (const pid of pidsToKill) {
-        await be.release(pid)
-        log('info', 'wake lock released', { pid })
-      }
-      ownHolderPid = null
-      update((data) => { data.holderPid = null })
-    })
-  }
-
-  function addSession(sessionID: string): boolean {
-    const result = update((data) => {
-      if (data.activeSessions.some((e) => e.id === sessionID)) {
-        touchOwnSessions(data)
-        return
-      }
-      data.activeSessions.push({ id: sessionID, pid: process.pid, lastSeen: Date.now() })
-    })
-    return result.activeSessions.length === 1 &&
-      result.activeSessions[0]!.id === sessionID
-  }
-
-  function removeSession(sessionID: string): boolean {
-    const result = update((data) => {
-      const idx = data.activeSessions.findIndex((e) => e.id === sessionID)
-      if (idx !== -1) data.activeSessions.splice(idx, 1)
-    })
-    return result.activeSessions.length === 0
-  }
-
-  async function onHeartbeat(): Promise<void> {
-    update((data) => { touchOwnSessions(data) })
-
-    const lock = load()
-    if (lock.activeSessions.length > 0) {
-      await ensureHolder()
-    } else {
-      await releaseHolder()
-    }
+      if (busySessions.size > 0) return;
+      if (holderPid === null) return;
+      const pid = holderPid;
+      await be.release(pid);
+      holderPid = null;
+      log("info", "wake lock released", { pid });
+    });
   }
 
   function syncCleanup(): void {
-    try {
-      update((data) => {
-        data.activeSessions = data.activeSessions.filter((e) => e.pid !== process.pid)
-        if (data.activeSessions.length === 0 && data.holderPid !== null) {
-          try { process.kill(data.holderPid) } catch { /* dead */ }
-          data.holderPid = null
-          ownHolderPid = null
-        }
-      })
-    } catch { /* best effort */ }
+    if (holderPid !== null) {
+      try {
+        process.kill(holderPid);
+      } catch {
+        /* dead */
+      }
+      holderPid = null;
+    }
   }
 
-  function installExitHandlers(): void {
-    process.on('exit', syncCleanup)
+  function installExitHandler(): void {
+    if (exitHandlerInstalled) return;
+    exitHandlerInstalled = true;
+    process.on("exit", syncCleanup);
   }
 
-  installExitHandlers()
-  heartbeatTimer = setInterval(() => { onHeartbeat().catch(() => {}) }, HEARTBEAT_MS)
-  heartbeatTimer.unref()
-  const ready = (async () => {
-    await releaseOrphan(reapDead())
-    await ensureHolder()
-  })()
+  async function addSession(sessionID: string): Promise<void> {
+    if (busySessions.has(sessionID)) return;
+    const wasEmpty = busySessions.size === 0;
+    busySessions.add(sessionID);
+    if (wasEmpty) await ensureHolder();
+  }
+
+  async function removeSession(sessionID: string): Promise<void> {
+    if (!busySessions.delete(sessionID)) return;
+    if (busySessions.size === 0) await releaseHolder();
+  }
 
   return {
-    ready,
+    async handle(event) {
+      // V2 (2.0.8) drives the busy lifecycle through session.execution.*, not
+      // session.status (which is not emitted on the public stream). started =>
+      // busy; succeeded/failed/interrupted => done.
+      const sessionID: string | undefined = event.data?.sessionID;
+      if (!sessionID) return;
 
-    async event({ event }: { event: any }) {
-      if (event.type.startsWith('session.')) {
-        log('debug', `event: ${event.type}`, { properties: event.properties })
+      if (event.type === "session.execution.started") {
+        await addSession(sessionID);
+        return;
       }
 
-      if (event.type === 'session.status') {
-        const { sessionID, status } = event.properties
-        const statusType: string = status?.type
-
-        if (statusType === 'busy' || statusType === 'retry') {
-          const isFirst = addSession(sessionID)
-          if (isFirst) await ensureHolder()
-        } else if (statusType === 'idle') {
-          const nowEmpty = removeSession(sessionID)
-          if (nowEmpty) {
-            await releaseHolder()
-          }
-        }
-      }
-
-      if (event.type === 'session.idle') {
-        const sessionID = event.properties?.sessionID
-        if (sessionID) {
-          const nowEmpty = removeSession(sessionID)
-          if (nowEmpty) await releaseHolder()
-        }
-      }
-
-      if (event.type === 'session.deleted') {
-        const sessionID = event.properties?.info?.id
-        if (sessionID) {
-          const nowEmpty = removeSession(sessionID)
-          if (nowEmpty) await releaseHolder()
-        }
-      }
-
-      if (event.type === 'session.error') {
-        const sessionID = event.properties?.sessionID
-        if (sessionID) {
-          const nowEmpty = removeSession(sessionID)
-          if (nowEmpty) await releaseHolder()
-        }
+      if (
+        event.type === "session.execution.succeeded" ||
+        event.type === "session.execution.failed" ||
+        event.type === "session.execution.interrupted" ||
+        event.type === "session.deleted"
+      ) {
+        await removeSession(sessionID);
       }
     },
 
-    async dispose() {
-      if (disposed) return
-      disposed = true
-      if (heartbeatTimer) clearInterval(heartbeatTimer)
-      update((data) => {
-        data.activeSessions = data.activeSessions.filter((e) => e.pid !== process.pid)
-      })
-      const lock = load()
-      if (lock.activeSessions.length === 0) {
-        await releaseHolder()
-      }
+    attach() {
+      refs++;
+      installExitHandler();
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        refs--;
+        if (refs === 0) {
+          busySessions.clear();
+          await releaseHolder();
+        }
+      };
     },
-  }
+  };
 }
 
-const plugin = async ({ client }: { client: any }) => {
-  const g = globalThis as any
-  if (!g[KEY]) {
-    g[KEY] = createSharedHandler(client)
-  }
-  const shared: SharedHandler = g[KEY]
-  await shared.ready
-
-  return {
-    async event(args: { event: any }) {
-      await shared.event(args)
-    },
-    async dispose() {
-      await shared.dispose()
-    },
-  }
+function getShared(): SharedHandler {
+  const g = globalThis as any;
+  if (!g[KEY]) g[KEY] = createSharedHandler();
+  return g[KEY] as SharedHandler;
 }
 
-export default plugin
-export { plugin }
+export default Plugin.define({
+  id: "keepalive",
+  setup(ctx) {
+    const shared = getShared();
+    const cleanupRef = shared.attach();
+    const controller = new AbortController();
+
+    void (async () => {
+      for await (const event of ctx.event.subscribe({
+        signal: controller.signal,
+      })) {
+        try {
+          await shared.handle(event as { type: string; data?: any });
+        } catch (e) {
+          // A handler error must not kill the subscription for the rest of the
+          // process lifetime.
+          log("error", `event handler failed: ${e}`);
+        }
+      }
+    })().catch(() => {
+      /* subscription aborted on cleanup */
+    });
+
+    return async () => {
+      controller.abort();
+      await cleanupRef();
+    };
+  },
+});
