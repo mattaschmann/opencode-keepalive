@@ -6,7 +6,7 @@ OpenCode **V2** plugin that prevents the host machine from sleeping while AI ses
 
 When any session begins execution (`session.execution.started`), the plugin spawns a background process that holds a system wake lock. When all sessions finish (`session.execution.succeeded` / `.failed` / `.interrupted`, or `session.deleted`), the wake lock is released and the machine can sleep normally.
 
-> Note: OpenCode V2 (2.0.8) does not emit `session.status`/`session.idle` on the public event stream — `session.execution.*` is the busy signal this plugin keys on.
+> Note: OpenCode V2 (2.2.6) does not emit `session.status`/`session.idle` on the public event stream — `session.execution.*` is the busy signal this plugin keys on.
 
 The plugin prevents system/disk sleep only — the display is allowed to sleep on its own schedule.
 
@@ -56,7 +56,7 @@ No build step — the plugin ships as TypeScript source and is loaded directly b
 
 ## Version tested
 
-- opencode v2.0.8 (macOS/darwin)
+- opencode v2.2.6 (macOS/darwin)
 - Confirmed: loads as `active` via `opencode api get /api/plugin`
 - Confirmed live: `caffeinate -i -m -w <server-pid>` spawns on `session.execution.started` during a real turn (verified via `pmset -g assertions`)
 - macOS (darwin): verify via `pmset -g assertions` — `PreventUserIdleSystemSleep` + `PreventDiskIdle` assert on acquire, clear on release
