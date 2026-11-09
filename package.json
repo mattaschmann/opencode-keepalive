@@ -16,7 +16,7 @@
   "keywords": ["opencode", "plugin", "sleep", "wake-lock", "keepalive"],
   "license": "MIT",
   "dependencies": {
-    "@opencode/plugin": "2.0.8"
+    "@opencode/plugin": "2.2.6"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
